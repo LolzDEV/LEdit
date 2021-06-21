@@ -1,4 +1,5 @@
 use tui::widgets::ListState;
+pub mod event;
 
 pub struct StatefulList<T> {
     pub state: ListState,
@@ -10,13 +11,6 @@ impl<T> StatefulList<T> {
         StatefulList {
             state: ListState::default(),
             items: Vec::new(),
-        }
-    }
-
-    pub fn with_items(items: Vec<T>) -> StatefulList<T> {
-        StatefulList {
-            state: ListState::default(),
-            items,
         }
     }
 
@@ -51,4 +45,37 @@ impl<T> StatefulList<T> {
     pub fn unselect(&mut self) {
         self.state.select(None);
     }
+}
+
+pub enum AppMode {
+    InsertMode,
+    CommandMode,
+    NormalMode,
+}
+
+#[derive(Clone, Copy)]
+pub enum StatusLevel {
+    INFO,
+    WARNING,
+    ERROR,
+}
+
+#[derive(Clone)]
+pub struct Status {
+    pub text: String,
+    pub level: StatusLevel,
+}
+
+impl Default for Status {
+    fn default() -> Self {
+        Status {
+            text: String::new(),
+            level: StatusLevel::INFO,
+        }
+    }
+}
+
+pub enum AppEvent {
+    Close,
+    ShowDialog((String, String)),
 }
