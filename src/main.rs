@@ -1,8 +1,7 @@
 mod application;
+use application::render;
 mod commands;
 mod util;
-
-use application::render;
 
 use crate::application::App;
 use async_std::channel::unbounded;

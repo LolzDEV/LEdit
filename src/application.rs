@@ -1,25 +1,32 @@
+use std::{
+    fmt::format,
+    fs::{self, File},
+    io::Write,
+};
+
 use crate::{
-    commands::{CommandParser, HelpCommand, QuitCommand},
+    commands::{CommandParser, HelpCommand, OpenCommand, QuitCommand},
     util::{
         event::{Event, Events},
-        AppEvent, AppMode, StatefulList, Status, StatusLevel,
+        AppEvent, AppMode, NodeType, StatefulList, Status, StatusLevel,
     },
 };
 
 use async_std::channel::{Receiver, Sender, TryRecvError};
 use std::{
-    borrow::Borrow,
+    borrow::{Borrow, BorrowMut},
     error::Error,
     io::{self},
     ops::IndexMut,
-    thread, vec,
+    path::{Path, PathBuf},
+    vec,
 };
 use termion::{event::Key, input::MouseTerminal, raw::IntoRawMode, screen::AlternateScreen};
 use tui::{
     backend::TermionBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{self, Span, Spans},
+    text::{Span, Spans},
     widgets::{Block, BorderType, Borders, List, ListItem, Paragraph, Wrap},
     Terminal,
 };
@@ -39,9 +46,11 @@ pub struct App {
     show_dialog: bool,
     dialog_content: String,
     dialog_title: String,
+    working_path: Option<String>,
+    file_list: Nodes,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Node {
     display_name: String,
     value: String,
@@ -49,6 +58,7 @@ struct Node {
     expanded: Option<bool>,
     uuid: uuid::Uuid,
     layer: u32,
+    node_type: NodeType,
 }
 
 // Node object, a node is an entry for the explorer that can have children
@@ -59,6 +69,7 @@ impl Node {
         children: Option<Vec<Box<Node>>>,
         expanded: Option<bool>,
         layer: u32,
+        node_type: NodeType,
     ) -> Node {
         Node {
             display_name,
@@ -67,6 +78,7 @@ impl Node {
             expanded,
             uuid: Uuid::new_v4(),
             layer,
+            node_type,
         }
     }
 }
@@ -82,7 +94,7 @@ impl Nodes {
     }
 
     // Get node from the group by its UUID
-    fn from_uuid(&mut self, uuid: Uuid) -> Option<&mut Node> {
+    fn from_uuid(&mut self, uuid: &Uuid) -> Option<&mut Node> {
         fn check(uuid: Uuid, node: &mut Node) -> Option<&mut Node> {
             if node.uuid == uuid {
                 return Some(node);
@@ -95,12 +107,13 @@ impl Nodes {
                     }
                 }
             }
-
             None
         }
 
         for node in self.nodes.iter_mut() {
-            return check(uuid, node);
+            if let Some(nd) = check(uuid.clone(), node) {
+                return Some(nd);
+            }
         }
 
         None
@@ -108,7 +121,7 @@ impl Nodes {
 }
 
 // Add entry to the explorer by expanding all the nodes
-fn expand(node: &Node, items: &mut Vec<ListItem>, app_list: &mut StatefulList<Node>) {
+fn expand(node: Node, items: &mut Vec<ListItem>, app_list: &mut StatefulList<Node>) {
     let mut display_name = node.display_name.to_string();
 
     match node.expanded {
@@ -136,19 +149,37 @@ fn expand(node: &Node, items: &mut Vec<ListItem>, app_list: &mut StatefulList<No
         value: display_name.to_string(),
         children: None,
         expanded: None,
-        uuid: node.uuid,
+        uuid: node.uuid.clone(),
         layer: 0,
+        node_type: NodeType::File,
     });
 
     items.push(
-        ListItem::new(vec![Spans::from(display_name.to_string())])
-            .style(Style::default().fg(Color::LightGreen).bg(Color::Black)),
+        ListItem::new(vec![Spans::from(display_name.to_string())]).style(
+            Style::default()
+                .fg(if let NodeType::Directory = node.node_type {
+                    if node.display_name.starts_with('.') {
+                        Color::Gray
+                    } else {
+                        Color::LightBlue
+                    }
+                } else if let NodeType::Info = node.node_type {
+                    Color::Gray
+                } else {
+                    if node.display_name.starts_with('.') {
+                        Color::Gray
+                    } else {
+                        Color::LightGreen
+                    }
+                })
+                .bg(Color::Black),
+        ),
     );
 
     if let Some(true) = node.expanded {
         if let Some(children) = node.children.clone() {
             for child in children.iter() {
-                expand(child, items, app_list);
+                expand(*child.clone(), items, app_list);
             }
         }
     }
@@ -169,17 +200,85 @@ impl App {
             show_dialog: false,
             dialog_content: String::new(),
             dialog_title: String::new(),
+            working_path: None,
+            file_list: Nodes::new(Vec::new()),
         })
     }
 
     pub fn setup_commands(&mut self) {
         self.command_parser.add_command(Box::new(QuitCommand));
+        self.command_parser.add_command(Box::new(OpenCommand));
         self.command_parser
             .add_command(Box::new(HelpCommand::new(&self.command_parser.commands)));
     }
 
     pub fn close(&mut self) {
         self.should_close = true;
+    }
+
+    pub fn load_explorer(&mut self) -> Result<(), Box<dyn Error>> {
+        fn expand_path(dir: PathBuf, level: u32) -> Result<Node, Box<dyn Error>> {
+            let mut node: Node = Node::new(
+                dir.file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+                    .clone(),
+                dir.to_str().unwrap().to_string().clone(),
+                None,
+                None,
+                level,
+                NodeType::Directory,
+            );
+            if dir.exists() {
+                let mut children = Vec::new();
+                if dir.is_dir() {
+                    for entry in dir.read_dir()? {
+                        if let Ok(en) = entry {
+                            if let Ok(child) = expand_path(en.path(), level + 1) {
+                                children.push(Box::new(child));
+                            }
+                        }
+                    }
+                    node.children = Some(children);
+                    node.expanded = Some(false);
+                    node.node_type = NodeType::Directory;
+                } else {
+                    node.node_type = NodeType::File;
+                }
+            }
+
+            Ok(node)
+        }
+
+        if let Some(workspace_path) = &self.working_path {
+            let mut expl = Vec::new();
+            let path = Path::new(workspace_path);
+            if path.exists() {
+                if path.is_dir() {
+                    for entry in path.read_dir()? {
+                        if let Ok(en) = entry {
+                            if let Ok(nd) = expand_path(en.path(), 0) {
+                                expl.push(nd.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            self.file_list.nodes = expl;
+        } else {
+            self.file_list.nodes = vec![Node::new(
+                "Empty workspace".to_string(),
+                "".to_string(),
+                None,
+                None,
+                0,
+                NodeType::Info,
+            )];
+        }
+
+        Ok(())
     }
 }
 
@@ -191,50 +290,15 @@ pub fn render(app: &mut App) -> Result<(), Box<dyn Error>> {
     let backend = TermionBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut file_list = Nodes::new(vec![
-        Node::new(
-            String::from("src"),
-            String::from("src"),
-            Some(vec![Box::new(Node::new(
-                String::from("main.rs"),
-                String::from("main.rs"),
-                Some(vec![Box::new(Node::new(
-                    String::from("main.rs"),
-                    String::from("main.rs"),
-                    None,
-                    None,
-                    2,
-                ))]),
-                Some(false),
-                1,
-            ))]),
-            Some(false),
-            0,
-        ),
-        Node::new(
-            String::from("Cargo.toml"),
-            String::from("Cargo.toml"),
-            None,
-            None,
-            0,
-        ),
-        Node::new(
-            String::from("Cargo.lock"),
-            String::from("Cargo.lock"),
-            None,
-            None,
-            0,
-        ),
-        Node::new(
-            String::from(".gitignore"),
-            String::from(".gitignore"),
-            None,
-            None,
-            0,
-        ),
-    ]);
+    if let Err(_) = app.load_explorer() {
+        app.status = Status {
+            text: "Cannot load explorer!".to_string(),
+            level: StatusLevel::ERROR,
+        }
+    }
 
     loop {
+        // If the app should close, close it
         if app.should_close {
             break;
         }
@@ -243,13 +307,16 @@ pub fn render(app: &mut App) -> Result<(), Box<dyn Error>> {
                 // Size for the current frame
                 let size = f.size();
 
+                // If a dialog is open, render it
                 if app.show_dialog {
+                    // Block of the dialog
                     let dialog_block = Block::default()
                         .title(app.dialog_title.clone())
                         .border_style(Style::default().fg(Color::Red))
                         .border_type(BorderType::Rounded)
                         .borders(Borders::ALL);
 
+                    // Block of the "continue" text
                     let continue_block = Block::default().borders(Borders::NONE);
 
                     let dialog_paragraph = Paragraph::new(app.dialog_content.clone())
@@ -348,8 +415,8 @@ pub fn render(app: &mut App) -> Result<(), Box<dyn Error>> {
 
                     let mut items: Vec<ListItem> = Vec::new();
                     app.items.items = Vec::new();
-                    for item in file_list.nodes.iter() {
-                        expand(item, &mut items, &mut app.items);
+                    for item in app.file_list.nodes.iter() {
+                        expand(item.clone(), &mut items, &mut app.items);
                     }
 
                     // Create a List from all list items and highlight the currently selected one
@@ -446,61 +513,98 @@ pub fn render(app: &mut App) -> Result<(), Box<dyn Error>> {
         match app.events.next().unwrap() {
             Event::Input(input) => match app.mode {
                 AppMode::NormalMode => match input {
+                    // If `enter` is pressed and the dialog is open, close it
                     Key::Char('\n') => {
                         if app.show_dialog {
                             app.show_dialog = false;
                         }
                     }
                     // If 'q' is pressed, quit the app
-                    Key::Char('q') => app.close(),
+                    Key::Char('q') => {
+                        if !app.show_dialog {
+                            app.close()
+                        }
+                    }
                     // If 'f' is pressed open/close the explorer
-                    Key::Char('f') => app.file_view = !app.file_view,
+                    Key::Char('f') => {
+                        if !app.show_dialog {
+                            app.file_view = !app.file_view
+                        }
+                    }
                     // If 'c' is pressed go in command mode
-                    Key::Char('c') => app.mode = AppMode::CommandMode,
+                    Key::Char('c') => {
+                        if !app.show_dialog {
+                            app.mode = AppMode::CommandMode
+                        }
+                    }
                     // If 'i' is pressed go in insert mode
-                    Key::Char('i') => app.mode = AppMode::InsertMode,
+                    Key::Char('i') => {
+                        if !app.show_dialog {
+                            app.mode = AppMode::InsertMode
+                        }
+                    }
                     // If the left arrow is pressed unselect the entry from the explorer
-                    Key::Left => {
-                        if app.file_view {
-                            app.items.unselect();
+                    Key::Esc => {
+                        if !app.show_dialog {
+                            if app.file_view {
+                                app.items.unselect();
+                            }
                         }
                     }
                     // If the down arrow is pressed select the next entry in the explorer
                     Key::Down => {
-                        if app.file_view {
-                            app.items.next();
+                        if !app.show_dialog {
+                            if app.file_view {
+                                app.items.next();
+                            }
                         }
                     }
                     // If the up arrow is pressed select the previous entry in the explorer
                     Key::Up => {
-                        if app.file_view {
-                            app.items.previous();
+                        if !app.show_dialog {
+                            if app.file_view {
+                                app.items.previous();
+                            }
                         }
                     }
                     // If the right arrow is pressed expand the selected node
-                    Key::Right => {
-                        if let Some(ind) = app.items.state.selected() {
-                            if let Some(node) =
-                                file_list.from_uuid(app.items.items.index_mut(ind).uuid)
-                            {
-                                if let Some(exp) = node.expanded {
-                                    node.expanded = Some(!exp);
+                    Key::Char(' ') => {
+                        if !app.show_dialog {
+                            if let Some(ind) = app.items.state.selected() {
+                                app.status = Status {
+                                    text: format!("{:?}", &app.items.items.index_mut(ind).uuid),
+                                    level: StatusLevel::INFO,
+                                };
+                                if let Some(node) = app
+                                    .file_list
+                                    .from_uuid(&app.items.items.index_mut(ind).uuid)
+                                {
+                                    if let Some(exp) = node.expanded {
+                                        node.expanded = Some(!exp);
+                                    }
                                 }
                             }
                         }
                     }
                     _ => {}
                 },
+                // When the app is in insert mode
                 AppMode::InsertMode => match input {
+                    // If `esc` is pressed go in normal mode
                     Key::Esc => app.mode = AppMode::NormalMode,
                     _ => {}
                 },
+                // When the app is in command mode
                 AppMode::CommandMode => match input {
+                    // If `esc` is pressed go in normal mode
                     Key::Esc => app.mode = AppMode::NormalMode,
+                    // If `enter` is pressed and the command buffer is not empty
                     Key::Char('\n') => {
                         if app.command_buffer != "" {
+                            // Parse the command with te command parser
                             match app.command_parser.parse(app.command_buffer.clone()) {
                                 Ok((cmd, tx)) => {
+                                    // Get the arguments
                                     let mut args: Vec<String> = app
                                         .command_buffer
                                         .clone()
@@ -510,7 +614,9 @@ pub fn render(app: &mut App) -> Result<(), Box<dyn Error>> {
                                     args.remove(0);
                                     if let Err(crate::commands::CommandError::InvalidSyntax) =
                                         cmd.execute(tx, &args)
+                                    // Execute the command and check for errors
                                     {
+                                        // If there is an error show it in the status
                                         app.status = Status {
                                             text: format!(
                                                 "Invalid syntax! Type `help {}`",
@@ -520,21 +626,51 @@ pub fn render(app: &mut App) -> Result<(), Box<dyn Error>> {
                                             level: crate::util::StatusLevel::ERROR,
                                         }
                                     }
-                                    app.command_buffer = String::new();
                                 }
                                 Err(e) => match e {
+                                    // If the command is not found, show it in the status
                                     crate::commands::CommandError::NotFound => {
                                         app.status = Status {
                                             text: "Command not found!".to_string(),
                                             level: crate::util::StatusLevel::ERROR,
                                         }
                                     }
-                                    crate::commands::CommandError::InvalidSyntax => todo!(),
+                                    // If the command has an invalid syntaxt, show it in the status
+                                    crate::commands::CommandError::InvalidSyntax => {
+                                        app.status = Status {
+                                            text: "Invalid syntax!".to_string(),
+                                            level: crate::util::StatusLevel::ERROR,
+                                        }
+                                    }
+                                    // If an execution error is throwed
+                                    crate::commands::CommandError::ExecutionError(e) => {
+                                        // If a description is provided, show it in the status
+                                        if let Some(e) = e {
+                                            app.status = Status {
+                                                text: format!(
+                                                    "Error while executing the command: {}",
+                                                    &e
+                                                ),
+                                                level: crate::util::StatusLevel::ERROR,
+                                            }
+                                        // Else say that an unknown error has been catched
+                                        } else {
+                                            app.status = Status {
+                                                text: "Error while executing the command: Unknown error"
+                                                    .to_string(),
+                                                level: crate::util::StatusLevel::ERROR,
+                                            }
+                                        }
+                                    }
                                 },
                             }
+                            // Free the command buffer
+                            app.command_buffer = String::new();
                         }
                     }
+                    // If a char key is pressed, add that character to the command buffer
                     Key::Char(c) => app.command_buffer.push(c),
+                    // If backspace is pressed remove tha last character from the command buffer
                     Key::Backspace => {
                         app.command_buffer.pop();
                     }
@@ -544,14 +680,32 @@ pub fn render(app: &mut App) -> Result<(), Box<dyn Error>> {
             Event::Tick => (),
         }
 
+        // This checks the receiver that is bound to a sender used by commands
         match app.receiver.try_recv() {
+            // Close the application if requested
             Ok(AppEvent::Close) => app.close(),
+            // Show a dialog with the given information
             Ok(AppEvent::ShowDialog((title, content))) => {
                 app.show_dialog = true;
                 app.dialog_content = content;
                 app.mode = AppMode::NormalMode;
                 app.dialog_title = title;
             }
+            // Set the status with the given information
+            Ok(AppEvent::SetStatus(s)) => {
+                app.status = s;
+            }
+            // Set the workspace to the given path
+            Ok(AppEvent::SetWorkspace(w)) => {
+                app.working_path = Some(w);
+                if let Err(_) = app.load_explorer() {
+                    app.status = Status {
+                        text: "Error while loading the explorer".to_string(),
+                        level: StatusLevel::ERROR,
+                    };
+                }
+            }
+            // If there is an error while receiving, show it in the status
             Err(e) => {
                 if e == TryRecvError::Closed {
                     app.status = Status {

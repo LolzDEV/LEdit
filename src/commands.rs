@@ -1,9 +1,9 @@
-use std::{borrow::Borrow, collections::HashMap};
+use std::collections::HashMap;
 
 use async_std::channel::Sender;
 use futures::executor::block_on;
 
-use crate::{application::App, util::AppEvent};
+use crate::util::{AppEvent, Status};
 
 pub trait Command {
     fn get_name(&self) -> String;
@@ -15,6 +15,7 @@ pub trait Command {
 pub enum CommandError {
     NotFound,
     InvalidSyntax,
+    ExecutionError(Option<String>),
 }
 
 pub struct CommandParser {
@@ -68,14 +69,48 @@ impl Command for QuitCommand {
         vec![String::from("q")]
     }
 
-    fn execute(&self, tx: Sender<AppEvent>, args: &Vec<String>) -> Result<(), CommandError> {
-        block_on(tx.send(AppEvent::Close));
+    fn execute(&self, tx: Sender<AppEvent>, _args: &Vec<String>) -> Result<(), CommandError> {
+        if let Err(_) = block_on(tx.send(AppEvent::Close)) {
+            return Err(CommandError::ExecutionError(Some(
+                "Error while sending the quit event to the application".to_string(),
+            )));
+        }
 
         Ok(())
     }
 
     fn get_description(&self) -> String {
         "Quits the application without saving.\nUsage: quit".to_string()
+    }
+}
+
+pub struct OpenCommand;
+
+impl Command for OpenCommand {
+    fn get_name(&self) -> String {
+        String::from("open")
+    }
+
+    fn get_aliases(&self) -> Vec<String> {
+        vec![String::from("o")]
+    }
+
+    fn execute(&self, tx: Sender<AppEvent>, args: &Vec<String>) -> Result<(), CommandError> {
+        if args.len() < 1 {
+            return Err(CommandError::InvalidSyntax);
+        }
+
+        if let Err(_) = block_on(tx.send(AppEvent::SetWorkspace(args[0].clone()))) {
+            return Err(CommandError::ExecutionError(Some(
+                "Error while sending workspace event to the application".to_string(),
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn get_description(&self) -> String {
+        "Set the current workspace to the given one.\nUsage: open <directory>".to_string()
     }
 }
 
@@ -112,14 +147,27 @@ impl Command for HelpCommand {
         }
 
         if self.commands.contains_key(&args[0]) {
-            block_on(tx.send(AppEvent::ShowDialog((
+            if let Err(_) = block_on(tx.send(AppEvent::ShowDialog((
                 format!("Help for {} command", args[0]),
                 if let Some(desc) = self.commands.get(&args[0]) {
                     desc.to_string()
                 } else {
                     "No description provided :(".to_string()
                 },
-            ))));
+            )))) {
+                return Err(CommandError::ExecutionError(Some(
+                    "Error while sending the dialog event to the application".to_string(),
+                )));
+            }
+        } else {
+            if let Err(_) = block_on(tx.send(AppEvent::SetStatus(Status {
+                text: format!("{} command doesn't exist", args[0]),
+                level: crate::util::StatusLevel::ERROR,
+            }))) {
+                return Err(CommandError::ExecutionError(Some(
+                    "Error while sending the status event to the application".to_string(),
+                )));
+            }
         }
 
         Ok(())

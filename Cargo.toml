@@ -15,3 +15,4 @@ tui = "0.15.0"
 uuid = {version = "0.8.2", features = ["v4"]}
 async-std = "1.9.0"
 futures = "0.3"
+lazy_static = "1.4.0"

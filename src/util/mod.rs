@@ -78,4 +78,13 @@ impl Default for Status {
 pub enum AppEvent {
     Close,
     ShowDialog((String, String)),
+    SetStatus(Status),
+    SetWorkspace(String),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum NodeType {
+    File,
+    Directory,
+    Info,
 }
