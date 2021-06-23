@@ -41,7 +41,7 @@ pub struct App {
     show_dialog: bool,
     dialog_content: String,
     dialog_title: String,
-    working_path: Option<String>,
+    pub working_path: Option<String>,
     file_list: Nodes,
 }
 
