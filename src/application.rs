@@ -1,8 +1,4 @@
-use std::{
-    fmt::format,
-    fs::{self, File},
-    io::Write,
-};
+use std::cmp::Ordering;
 
 use crate::{
     commands::{CommandParser, HelpCommand, OpenCommand, QuitCommand},
@@ -14,7 +10,6 @@ use crate::{
 
 use async_std::channel::{Receiver, Sender, TryRecvError};
 use std::{
-    borrow::{Borrow, BorrowMut},
     error::Error,
     io::{self},
     ops::IndexMut,
@@ -80,6 +75,38 @@ impl Node {
             layer,
             node_type,
         }
+    }
+
+    fn cmp(&self, other: &Self) -> Ordering {
+        if let NodeType::Info = self.node_type {
+            if let NodeType::Info = other.node_type {
+                return self.display_name.cmp(&other.display_name);
+            } else {
+                return Ordering::Greater;
+            }
+        }
+
+        if let NodeType::Directory = self.node_type {
+            if let NodeType::Directory = other.node_type {
+                return self.display_name.cmp(&other.display_name);
+            } else if let NodeType::Info = other.node_type {
+                return Ordering::Less;
+            } else if let NodeType::File = other.node_type {
+                return Ordering::Greater;
+            }
+        }
+
+        if let NodeType::File = self.node_type {
+            if let NodeType::Directory = other.node_type {
+                return Ordering::Less;
+            } else if let NodeType::Info = other.node_type {
+                return Ordering::Less;
+            } else if let NodeType::File = other.node_type {
+                return self.display_name.cmp(&other.display_name);
+            }
+        }
+
+        Ordering::Equal
     }
 }
 
@@ -277,6 +304,8 @@ impl App {
                 NodeType::Info,
             )];
         }
+
+        self.file_list.nodes.sort_by(|a, b| b.cmp(a));
 
         Ok(())
     }
@@ -571,10 +600,6 @@ pub fn render(app: &mut App) -> Result<(), Box<dyn Error>> {
                     Key::Char(' ') => {
                         if !app.show_dialog {
                             if let Some(ind) = app.items.state.selected() {
-                                app.status = Status {
-                                    text: format!("{:?}", &app.items.items.index_mut(ind).uuid),
-                                    level: StatusLevel::INFO,
-                                };
                                 if let Some(node) = app
                                     .file_list
                                     .from_uuid(&app.items.items.index_mut(ind).uuid)

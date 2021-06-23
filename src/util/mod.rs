@@ -53,6 +53,7 @@ pub enum AppMode {
     NormalMode,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub enum StatusLevel {
     INFO,
@@ -84,7 +85,7 @@ pub enum AppEvent {
 
 #[derive(Clone, Copy, Debug)]
 pub enum NodeType {
-    File,
-    Directory,
-    Info,
+    File = 1,
+    Directory = 2,
+    Info = 0,
 }
