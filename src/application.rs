@@ -1,10 +1,11 @@
-use std::cmp::Ordering;
+use std::{borrow::Borrow, cmp::Ordering};
 
 use crate::{
     commands::{CommandParser, HelpCommand, OpenCommand, QuitCommand},
+    logs::{LogLevel, Logger},
     util::{
         event::{Event, Events},
-        AppEvent, AppMode, NodeType, StatefulList, Status, StatusLevel,
+        AppEvent, AppMode, Config, NodeType, StatefulList, Status, StatusLevel, Theme,
     },
 };
 
@@ -43,6 +44,8 @@ pub struct App {
     dialog_title: String,
     pub working_path: Option<String>,
     file_list: Nodes,
+    logger: Logger,
+    config: Config,
 }
 
 #[derive(Clone, Debug)]
@@ -78,6 +81,27 @@ impl Node {
     }
 
     fn cmp(&self, other: &Self) -> Ordering {
+        if self.display_name.starts_with('.') {
+            if other.display_name.starts_with('.') {
+                if let NodeType::Directory = self.node_type {
+                    if let NodeType::Directory = other.node_type {
+                        return self.display_name.cmp(&other.display_name);
+                    } else {
+                        return Ordering::Greater;
+                    }
+                } else if let NodeType::File = self.node_type {
+                    if let NodeType::File = other.node_type {
+                        return self.display_name.cmp(&other.display_name);
+                    } else {
+                        return Ordering::Less;
+                    }
+                }
+                return Ordering::Equal;
+            } else {
+                return Ordering::Greater;
+            }
+        }
+
         if let NodeType::Info = self.node_type {
             if let NodeType::Info = other.node_type {
                 return self.display_name.cmp(&other.display_name);
@@ -148,7 +172,12 @@ impl Nodes {
 }
 
 // Add entry to the explorer by expanding all the nodes
-fn expand(node: Node, items: &mut Vec<ListItem>, app_list: &mut StatefulList<Node>) {
+fn expand(
+    node: Node,
+    items: &mut Vec<ListItem>,
+    app_list: &mut StatefulList<Node>,
+    config: &Config,
+) {
     let mut display_name = node.display_name.to_string();
 
     match node.expanded {
@@ -186,34 +215,94 @@ fn expand(node: Node, items: &mut Vec<ListItem>, app_list: &mut StatefulList<Nod
             Style::default()
                 .fg(if let NodeType::Directory = node.node_type {
                     if node.display_name.starts_with('.') {
-                        Color::Gray
+                        Theme::get_color_for(if let Some(theme) = config.theme.clone() {
+                            if let Some(k) = theme.explorer_hidden_foreground {
+                                Some(k)
+                            } else {
+                                Some(Theme::default().explorer_hidden_foreground.unwrap())
+                            }
+                        } else {
+                            Some(Theme::default().explorer_hidden_foreground.unwrap())
+                        })
+                        .unwrap()
                     } else {
-                        Color::LightBlue
+                        Theme::get_color_for(if let Some(theme) = config.theme.clone() {
+                            if let Some(k) = theme.explorer_directory_foreground {
+                                Some(k)
+                            } else {
+                                Some(Theme::default().explorer_directory_foreground.unwrap())
+                            }
+                        } else {
+                            Some(Theme::default().explorer_directory_foreground.unwrap())
+                        })
+                        .unwrap()
                     }
                 } else if let NodeType::Info = node.node_type {
-                    Color::Gray
+                    Theme::get_color_for(if let Some(theme) = config.theme.clone() {
+                        if let Some(k) = theme.explorer_info_foreground {
+                            Some(k)
+                        } else {
+                            Some(Theme::default().explorer_info_foreground.unwrap())
+                        }
+                    } else {
+                        Some(Theme::default().explorer_info_foreground.unwrap())
+                    })
+                    .unwrap()
                 } else {
                     if node.display_name.starts_with('.') {
-                        Color::Gray
+                        Theme::get_color_for(if let Some(theme) = config.theme.clone() {
+                            if let Some(k) = theme.explorer_hidden_foreground {
+                                Some(k)
+                            } else {
+                                Some(Theme::default().explorer_hidden_foreground.unwrap())
+                            }
+                        } else {
+                            Some(Theme::default().explorer_hidden_foreground.unwrap())
+                        })
+                        .unwrap()
                     } else {
-                        Color::LightGreen
+                        Theme::get_color_for(if let Some(theme) = config.theme.clone() {
+                            if let Some(k) = theme.explorer_file_foreground {
+                                Some(k)
+                            } else {
+                                Some(Theme::default().explorer_file_foreground.unwrap())
+                            }
+                        } else {
+                            Some(Theme::default().explorer_file_foreground.unwrap())
+                        })
+                        .unwrap()
                     }
                 })
-                .bg(Color::Black),
+                .bg(
+                    Theme::get_color_for(if let Some(theme) = config.theme.clone() {
+                        if let Some(k) = theme.app_background {
+                            Some(k)
+                        } else {
+                            Some(Theme::default().app_background.unwrap())
+                        }
+                    } else {
+                        Some(Theme::default().app_background.unwrap())
+                    })
+                    .unwrap(),
+                ),
         ),
     );
 
     if let Some(true) = node.expanded {
         if let Some(children) = node.children.clone() {
             for child in children.iter() {
-                expand(*child.clone(), items, app_list);
+                expand(*child.clone(), items, app_list, config);
             }
         }
     }
 }
 
 impl App {
-    pub fn new(tx: Sender<AppEvent>, rx: Receiver<AppEvent>) -> Result<App, Box<dyn Error>> {
+    pub fn new(
+        tx: Sender<AppEvent>,
+        rx: Receiver<AppEvent>,
+        config: Config,
+    ) -> Result<App, Box<dyn Error>> {
         Ok(App {
             items: StatefulList::new(),
             file_view: true,
@@ -229,6 +318,12 @@ impl App {
             dialog_title: String::new(),
             working_path: None,
             file_list: Nodes::new(Vec::new()),
+            logger: Logger::new(if let Some(dir) = &config.logs_directory {
+                dir.clone()
+            } else {
+                Config::default().logs_directory.unwrap()
+            }),
+            config,
         })
     }
 
@@ -303,6 +398,10 @@ impl App {
                 0,
                 NodeType::Info,
             )];
+            self.logger.log(
+                LogLevel::WARN,
+                "No workspace directory is provided, using empty workspace".to_string(),
+            );
         }
 
         self.file_list.nodes.sort_by(|a, b| b.cmp(a));
@@ -319,16 +418,24 @@ pub fn render(app: &mut App) -> Result<(), Box<dyn Error>> {
     let backend = TermionBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    app.logger
+        .log(LogLevel::INFO, "Loading the explorer".to_string());
     if let Err(_) = app.load_explorer() {
         app.status = Status {
             text: "Cannot load explorer!".to_string(),
             level: StatusLevel::ERROR,
-        }
+        };
+        app.logger
+            .log(LogLevel::ERROR, "Cannot load the explorer".to_string());
+    } else {
+        app.logger
+            .log(LogLevel::INFO, "Explorer loaded".to_string());
     }
 
     loop {
-        // If the app should close, close it
+        // If the app should close, close it and write the generated logs
         if app.should_close {
+            app.logger.write();
             break;
         }
         terminal
@@ -381,7 +488,34 @@ pub fn render(app: &mut App) -> Result<(), Box<dyn Error>> {
                 // Main block
                 let block = Block::default()
                     .title("LEdit")
-                    .border_style(Style::default().fg(Color::Cyan))
+                    .border_style(
+                        Style::default().fg(Theme::get_color_for(
+                            if let Some(theme) = app.config.theme.clone() {
+                                if let Some(k) = theme.app_foreground {
+                                    Some(k)
+                                } else {
+                                    Some(Theme::default().app_foreground.unwrap())
+                                }
+                            } else {
+                                Some(Theme::default().app_foreground.unwrap())
+                            },
+                        )
+                        .unwrap()),
+                    )
+                    .style(
+                        Style::default().bg(Theme::get_color_for(
+                            if let Some(theme) = app.config.theme.clone() {
+                                if let Some(k) = theme.app_background {
+                                    Some(k)
+                                } else {
+                                    Some(Theme::default().app_background.unwrap())
+                                }
+                            } else {
+                                Some(Theme::default().app_background.unwrap())
+                            },
+                        )
+                        .unwrap()),
+                    )
                     .border_type(BorderType::Rounded)
                     .borders(Borders::TOP | Borders::BOTTOM);
                 f.render_widget(block, size);
@@ -434,25 +568,84 @@ pub fn render(app: &mut App) -> Result<(), Box<dyn Error>> {
                 if app.file_view {
                     let files = Block::default()
                         .border_style(Style::default().fg(if let AppMode::NormalMode = app.mode {
-                            Color::LightBlue
+                            Theme::get_color_for(if let Some(theme) = app.config.theme.clone() {
+                                if let Some(k) = theme.active_view_border {
+                                    Some(k)
+                                } else {
+                                    Some(Theme::default().active_view_border.unwrap())
+                                }
+                            } else {
+                                Some(Theme::default().active_view_border.unwrap())
+                            })
+                            .unwrap()
                         } else {
-                            Color::White
+                            Theme::get_color_for(if let Some(theme) = app.config.theme.clone() {
+                                if let Some(k) = theme.view_border {
+                                    Some(k)
+                                } else {
+                                    Some(Theme::default().view_border.unwrap())
+                                }
+                            } else {
+                                Some(Theme::default().view_border.unwrap())
+                            })
+                            .unwrap()
                         }))
                         .borders(Borders::ALL)
                         .title("Explorer")
-                        .border_type(BorderType::Plain);
+                        .border_type(BorderType::Plain)
+                        .style(
+                            Style::default().bg(Theme::get_color_for(
+                                if let Some(theme) = app.config.theme.clone() {
+                                    if let Some(k) = theme.explorer_background {
+                                        Some(k)
+                                    } else {
+                                        Some(Theme::default().explorer_background.unwrap())
+                                    }
+                                } else {
+                                    Some(Theme::default().explorer_background.unwrap())
+                                },
+                            )
+                            .unwrap()),
+                        );
 
                     let mut items: Vec<ListItem> = Vec::new();
                     app.items.items = Vec::new();
                     for item in app.file_list.nodes.iter() {
-                        expand(item.clone(), &mut items, &mut app.items);
+                        expand(
+                            item.clone(),
+                            &mut items,
+                            &mut app.items,
+                            app.config.borrow(),
+                        );
                     }
 
                     // Create a List from all list items and highlight the currently selected one
                     let items = List::new(items).block(files).highlight_style(
                         Style::default()
-                            .bg(Color::Gray)
-                            .fg(Color::Black)
+                            .bg(Theme::get_color_for(
+                                if let Some(theme) = app.config.theme.clone() {
+                                    if let Some(k) = theme.explorer_selected_background {
+                                        Some(k)
+                                    } else {
+                                        Some(Theme::default().explorer_selected_background.unwrap())
+                                    }
+                                } else {
+                                    Some(Theme::default().explorer_selected_background.unwrap())
+                                },
+                            )
+                            .unwrap())
+                            .fg(Theme::get_color_for(
+                                if let Some(theme) = app.config.theme.clone() {
+                                    if let Some(k) = theme.explorer_selected_foreground {
+                                        Some(k)
+                                    } else {
+                                        Some(Theme::default().explorer_selected_foreground.unwrap())
+                                    }
+                                } else {
+                                    Some(Theme::default().explorer_selected_foreground.unwrap())
+                                },
+                            )
+                            .unwrap())
                             .add_modifier(Modifier::BOLD),
                     );
 
@@ -466,14 +659,92 @@ pub fn render(app: &mut App) -> Result<(), Box<dyn Error>> {
 
                 // Status bar block
                 let mode_bar = Block::default()
-                    .border_style(Style::default().bg(Color::Blue).fg(Color::White))
+                    .border_style(
+                        Style::default()
+                            .bg(Theme::get_color_for(
+                                if let Some(theme) = app.config.theme.clone() {
+                                    if let Some(k) = theme.status_bar_background {
+                                        Some(k)
+                                    } else {
+                                        Some(Theme::default().status_bar_background.unwrap())
+                                    }
+                                } else {
+                                    Some(Theme::default().status_bar_background.unwrap())
+                                },
+                            )
+                            .unwrap())
+                            .fg(Theme::get_color_for(
+                                if let Some(theme) = app.config.theme.clone() {
+                                    if let Some(k) = theme.status_bar_foreground {
+                                        Some(k)
+                                    } else {
+                                        Some(Theme::default().status_bar_foreground.unwrap())
+                                    }
+                                } else {
+                                    Some(Theme::default().status_bar_foreground.unwrap())
+                                },
+                            )
+                            .unwrap()),
+                    )
                     .borders(Borders::empty())
-                    .style(Style::default().bg(Color::Rgb(0, 0, 255)));
+                    .style(
+                        Style::default().bg(Theme::get_color_for(
+                            if let Some(theme) = app.config.theme.clone() {
+                                if let Some(k) = theme.status_bar_background {
+                                    Some(k)
+                                } else {
+                                    Some(Theme::default().status_bar_background.unwrap())
+                                }
+                            } else {
+                                Some(Theme::default().status_bar_background.unwrap())
+                            },
+                        )
+                        .unwrap()),
+                    );
 
                 let status_bar = Block::default()
-                    .border_style(Style::default().bg(Color::Rgb(0, 0, 255)).fg(Color::White))
+                    .border_style(
+                        Style::default()
+                            .bg(Theme::get_color_for(
+                                if let Some(theme) = app.config.theme.clone() {
+                                    if let Some(k) = theme.status_bar_background {
+                                        Some(k)
+                                    } else {
+                                        Some(Theme::default().status_bar_background.unwrap())
+                                    }
+                                } else {
+                                    Some(Theme::default().status_bar_background.unwrap())
+                                },
+                            )
+                            .unwrap())
+                            .fg(Theme::get_color_for(
+                                if let Some(theme) = app.config.theme.clone() {
+                                    if let Some(k) = theme.status_bar_foreground {
+                                        Some(k)
+                                    } else {
+                                        Some(Theme::default().status_bar_foreground.unwrap())
+                                    }
+                                } else {
+                                    Some(Theme::default().status_bar_foreground.unwrap())
+                                },
+                            )
+                            .unwrap()),
+                    )
                     .borders(Borders::empty())
-                    .style(Style::default().bg(Color::Rgb(0, 0, 255)));
+                    .style(
+                        Style::default().bg(Theme::get_color_for(
+                            if let Some(theme) = app.config.theme.clone() {
+                                if let Some(k) = theme.status_bar_background {
+                                    Some(k)
+                                } else {
+                                    Some(Theme::default().status_bar_background.unwrap())
+                                }
+                            } else {
+                                Some(Theme::default().status_bar_background.unwrap())
+                            },
+                        )
+                        .unwrap()),
+                    );
                 // Current mode as string
                 let current_mode = match app.mode {
                     AppMode::InsertMode => "Insert Mode",
@@ -492,9 +763,42 @@ pub fn render(app: &mut App) -> Result<(), Box<dyn Error>> {
                     app.status.text.clone(),
                     Style::default()
                         .fg(match app.status.level {
-                            StatusLevel::ERROR => Color::Red,
-                            StatusLevel::INFO => Color::LightGreen,
-                            StatusLevel::WARNING => Color::Yellow,
+                            StatusLevel::ERROR => Theme::get_color_for(
+                                if let Some(theme) = app.config.theme.clone() {
+                                    if let Some(k) = theme.status_error {
+                                        Some(k)
+                                    } else {
+                                        Some(Theme::default().status_error.unwrap())
+                                    }
+                                } else {
+                                    Some(Theme::default().status_error.unwrap())
+                                },
+                            )
+                            .unwrap(),
+                            StatusLevel::INFO => Theme::get_color_for(
+                                if let Some(theme) = app.config.theme.clone() {
+                                    if let Some(k) = theme.status_info {
+                                        Some(k)
+                                    } else {
+                                        Some(Theme::default().status_info.unwrap())
+                                    }
+                                } else {
+                                    Some(Theme::default().status_info.unwrap())
+                                },
+                            )
+                            .unwrap(),
+                            StatusLevel::WARNING => Theme::get_color_for(
+                                if let Some(theme) = app.config.theme.clone() {
+                                    if let Some(k) = theme.status_warning {
+                                        Some(k)
+                                    } else {
+                                        Some(Theme::default().status_warning.unwrap())
+                                    }
+                                } else {
+                                    Some(Theme::default().status_warning.unwrap())
+                                },
+                            )
+                            .unwrap(),
                         })
                         .add_modifier(Modifier::BOLD),
                 )))
@@ -509,9 +813,36 @@ pub fn render(app: &mut App) -> Result<(), Box<dyn Error>> {
                 if let AppMode::CommandMode = app.mode {
                     let command_view = Block::default()
                         .title("Commands")
-                        .border_style(Style::default().fg(Color::LightBlue))
+                        .border_style(
+                            Style::default().fg(Theme::get_color_for(
+                                if let Some(theme) = app.config.theme.clone() {
+                                    if let Some(k) = theme.active_view_border {
+                                        Some(k)
+                                    } else {
+                                        Some(Theme::default().active_view_border.unwrap())
+                                    }
+                                } else {
+                                    Some(Theme::default().active_view_border.unwrap())
+                                },
+                            )
+                            .unwrap()),
+                        )
                         .borders(Borders::ALL)
-                        .border_type(BorderType::Plain);
+                        .border_type(BorderType::Plain)
+                        .style(
+                            Style::default().bg(Theme::get_color_for(
+                                if let Some(theme) = app.config.theme.clone() {
+                                    if let Some(k) = theme.commands_view_background {
+                                        Some(k)
+                                    } else {
+                                        Some(Theme::default().commands_view_background.unwrap())
+                                    }
+                                } else {
+                                    Some(Theme::default().commands_view_background.unwrap())
+                                },
+                            )
+                            .unwrap()),
+                        );
 
                     let command_paragraph =
                         Paragraph::new(format!("> {}", app.command_buffer)).block(command_view);
@@ -526,13 +857,45 @@ pub fn render(app: &mut App) -> Result<(), Box<dyn Error>> {
                 // Editor block
                 let editor = Block::default()
                     .border_style(Style::default().fg(if let AppMode::InsertMode = app.mode {
-                        Color::LightBlue
+                        Theme::get_color_for(if let Some(theme) = app.config.theme.clone() {
+                            if let Some(k) = theme.active_view_border {
+                                Some(k)
+                            } else {
+                                Some(Theme::default().active_view_border.unwrap())
+                            }
+                        } else {
+                            Some(Theme::default().active_view_border.unwrap())
+                        })
+                        .unwrap()
                     } else {
-                        Color::White
+                        Theme::get_color_for(if let Some(theme) = app.config.theme.clone() {
+                            if let Some(k) = theme.view_border {
+                                Some(k)
+                            } else {
+                                Some(Theme::default().view_border.unwrap())
+                            }
+                        } else {
+                            Some(Theme::default().view_border.unwrap())
+                        })
+                        .unwrap()
                     }))
                     .borders(Borders::ALL)
                     .title("Editor")
-                    .border_type(BorderType::Plain);
+                    .border_type(BorderType::Plain)
+                    .style(
+                        Style::default().bg(Theme::get_color_for(
+                            if let Some(theme) = app.config.theme.clone() {
+                                if let Some(k) = theme.editor_background {
+                                    Some(k)
+                                } else {
+                                    Some(Theme::default().editor_background.unwrap())
+                                }
+                            } else {
+                                Some(Theme::default().editor_background.unwrap())
+                            },
+                        )
+                        .unwrap()),
+                    );
 
                 f.render_widget(editor, chunks[1]);
             })
@@ -736,7 +1099,11 @@ pub fn render(app: &mut App) -> Result<(), Box<dyn Error>> {
                     app.status = Status {
                         text: format!("Error receiving application events: {:?}", &e),
                         level: crate::util::StatusLevel::ERROR,
-                    }
+                    };
+                    app.logger.log(
+                        LogLevel::ERROR,
+                        format!("Error receiving application events: {:?}", &e),
+                    )
                 }
             }
         }
